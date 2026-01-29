@@ -44,7 +44,8 @@ bool MSIFile::LoadStringPool()
     bool isMiniData = entryData->data.streamSize < header.miniStreamCutoffSize;
     Buffer bufData  = GetStream(entryData->data.startingSectorLocation, entryData->data.streamSize, isMiniData);
 
-    if (bufPool.GetLength() == 0)
+    // Must contain at least one entry or header
+    if (bufPool.GetLength() < 4)
         return false;
 
     stringPool.clear();
@@ -89,6 +90,7 @@ bool MSIFile::LoadStringPool()
 
     for (uint32 i = 0; i < count; i++) {
         if (i == 0) {
+            // Index 0 is always null/empty in MSI pools
             stringPool.push_back("");
             continue;
         }
@@ -414,4 +416,39 @@ const MsiTableDef* MSIFile::GetTableDefinition(const std::string& tableName) con
     if (it != tableDefs.end())
         return &it->second;
     return nullptr;
+}
+
+std::string MSIFile::ParseLpstr(const uint8_t* ptr, size_t avail)
+{
+    if (avail == 0)
+        return "";
+    uint32_t len = 0;
+    // Length is usually a DWORD before the string, but in SummaryInfo property variant,
+    // VT_LPSTR includes a 4-byte count.
+    // The pointer passed from ParseSummaryInformation points to the count.
+
+    if (avail < 4)
+        return "";
+    len = *(const uint32_t*) ptr;
+
+    // Safety check length
+    if (len > avail - 4)
+        len = (uint32_t) (avail - 4);
+    if (len == 0)
+        return "";
+
+    // If string is null-terminated in buffer, substr handles it if we stop early,
+    // but typically the count includes the null or it doesn't.
+    // VT_LPSTR is often null-terminated.
+
+    std::string s((const char*) (ptr + 4), len);
+    if (!s.empty() && s.back() == '\0')
+        s.pop_back();
+    return s;
+}
+
+// Helper needed by some parsers, but unused in current simplified logic
+std::string MSIFile::ParseLpwstr(const uint8_t* ptr, size_t avail)
+{
+    return "";
 }

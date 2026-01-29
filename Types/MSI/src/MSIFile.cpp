@@ -1,12 +1,46 @@
 ﻿#include "msi.hpp"
+#include <algorithm>
 
 using namespace GView::Type::MSI;
 using namespace AppCUI::Utils;
 
-MSIFile::MSIFile()
-    : header{},
-      sectorSize{0},
-      miniSectorSize{0}
+// --- Static Helper Functions for Binary Parsing ---
+
+static bool read_u32_le(const uint8_t* data, size_t avail, uint32_t& out)
+{
+    if (avail < 4)
+        return false;
+    out = (uint32_t) data[0] | ((uint32_t) data[1] << 8) | ((uint32_t) data[2] << 16) | ((uint32_t) data[3] << 24);
+    return true;
+}
+
+static bool read_u64_le(const uint8_t* data, size_t avail, uint64_t& out)
+{
+    if (avail < 8)
+        return false;
+    uint32_t low, high;
+    if (!read_u32_le(data, 4, low) || !read_u32_le(data + 4, avail - 4, high))
+        return false;
+    out = ((uint64_t) high << 32) | low;
+    return true;
+}
+
+static void filetime_to_time_t(uint64_t ft, std::time_t& t)
+{
+    // Windows FileTime: 100ns intervals since Jan 1, 1601
+    // Unix Epoch: Jan 1, 1970
+    // Difference: 11644473600 seconds
+    const uint64_t DIFF_SEC = 11644473600ULL;
+    uint64_t seconds        = ft / 10000000ULL;
+    if (seconds > DIFF_SEC)
+        t = (std::time_t) (seconds - DIFF_SEC);
+    else
+        t = 0;
+}
+
+// --- MSIFile Implementation ---
+
+MSIFile::MSIFile() : header{}, sectorSize{ 0 }, miniSectorSize{ 0 }
 {
 }
 
@@ -35,22 +69,23 @@ bool MSIFile::Update()
     BuildTree(this->rootDir);
     ParseSummaryInformation();
 
-    // Database Loading
+    // Database Loading (Implementation in MSIDatabase.cpp)
     if (LoadStringPool()) {
-        LoadDatabase(); // 1. Load Schema first
-        LoadTables();   // 2. Then build UI list based on Schema
+        LoadDatabase();
+        LoadTables();
     }
 
     return true;
 }
 
-// --- OLE Parsing ---
+// --- OLE Core Parsing ---
 
 bool MSIFile::LoadFAT()
 {
     uint32 numSectors = header.numFatSectors;
     FAT.clear();
-    FAT.reserve(numSectors * (sectorSize / 4));
+    // Pre-allocate to avoid reallocations
+    FAT.reserve(std::max(numSectors * (sectorSize / 4), (uint32) 1024));
 
     std::vector<uint32> difatList;
     difatList.reserve(numSectors);
@@ -65,8 +100,9 @@ bool MSIFile::LoadFAT()
     // 2. External DIFAT
     uint32 currentDifatSector = header.firstDifatSector;
     uint32 entriesPerDifat    = (sectorSize / 4) - 1;
+    uint32 safetyLimit        = 0;
 
-    while (currentDifatSector != ENDOFCHAIN && currentDifatSector != NOSTREAM) {
+    while (currentDifatSector != ENDOFCHAIN && currentDifatSector != NOSTREAM && safetyLimit++ < 10000) {
         uint64 offset = (uint64) (currentDifatSector + 1) * sectorSize;
         auto view     = this->obj->GetData().Get(offset, sectorSize, true);
         if (!view.IsValid())
@@ -82,7 +118,6 @@ bool MSIFile::LoadFAT()
 
     // 3. Load FAT Sectors
     for (uint32 sect : difatList) {
-        // The xth sector AFTER the header (header is sector -1)
         uint64 offset = (uint64) (sect + 1) * sectorSize;
         auto view     = this->obj->GetData().Get(offset, sectorSize, true);
         if (view.IsValid()) {
@@ -100,9 +135,10 @@ bool MSIFile::LoadDirectory()
     Buffer dirStream = GetStream(header.firstDirSector, 0, false);
     CHECK(dirStream.GetLength() > 0, false, "Failed to read Directory stream");
 
-    // The directory entry size is fixed at 128 bytes
+    // Directory entry size is fixed at 128 bytes
     uint32 count = (uint32) dirStream.GetLength() / 128;
     linearDirList.clear();
+    linearDirList.reserve(count);
 
     if (count > 0) {
         const DirectoryEntryData* d = (const DirectoryEntryData*) dirStream.GetData();
@@ -114,13 +150,10 @@ bool MSIFile::LoadDirectory()
 
             if (e->data.nameLength > 0) {
                 size_t charCount = e->data.nameLength / 2;
-
-                // Safety clamp
                 if (charCount > 32)
-                    charCount = 32;
-
-                // Strip the null terminator
-                charCount--;
+                    charCount = 32; // Safety clamp
+                if (charCount > 0)
+                    charCount--; // Strip null terminator
 
                 e->name.assign(d[i].name, charCount);
                 e->decodedName = MsiDecompressName(e->name);
@@ -128,7 +161,6 @@ bool MSIFile::LoadDirectory()
             linearDirList.push_back(e);
         }
 
-        // Copy the parsed root entry (index 0) to the class member
         if (!linearDirList.empty())
             rootDir = *linearDirList[0];
     }
@@ -159,28 +191,30 @@ AppCUI::Utils::Buffer MSIFile::GetStream(uint32 startSector, uint64 size, bool i
     Buffer result;
     uint32 sect = startSector;
 
-    // Safety
-    uint32 limit      = 0;
-    uint32 maxSectors = (uint32) (size / sSize) + 5;
+    // Safety checks
+    uint32 limit = 0;
+    // Allow a bit of overhead for fragmentation, but prevent infinite loops
+    uint32 maxSectors = (size > 0) ? (uint32) (size / sSize) + 100 : 20000;
 
     while (sect != ENDOFCHAIN && sect != NOSTREAM) {
-        if (sect >= table.size() || limit++ > maxSectors + 1000)
+        if (sect >= table.size() || limit++ > maxSectors)
             break;
 
         if (isMini) {
-            // Sector 0 is at offset 0 of the MiniStream
             uint64 fileOffset = (uint64) sect * sSize;
             if (fileOffset + sSize <= miniStream.GetLength())
                 result.Add(BufferView(miniStream.GetData() + fileOffset, sSize));
         } else {
-            // Logical "Sector 0" starts at Physical Block 1
-            uint64 fileOffset = (uint64) (sect + 1) * sSize;
+            // Logical Sector 0 = Physical Sector 1 (after 512b Header)
+            uint64 fileOffset = (uint64) (sect + 1) * sectorSize;
             auto chunk        = this->obj->GetData().CopyToBuffer(fileOffset, sSize);
             if (chunk.IsValid())
                 result.Add(chunk);
         }
 
         sect = table[sect];
+
+        // Optimization: Stop if we gathered enough data
         if (size > 0 && result.GetLength() >= size) {
             result.Resize(size);
             break;
@@ -210,37 +244,38 @@ void MSIFile::BuildTree(DirEntry& parent)
     for (uint32 id : siblingIDs) {
         DirEntry* src      = linearDirList[id];
         DirEntry childNode = *src;
-        childNode.children.clear();
+        childNode.children.clear(); // Children will be built recursively
 
-        if (childNode.data.objectType == 1 || childNode.data.objectType == 5) {
+        if (childNode.data.objectType == 1 || childNode.data.objectType == 5) { // Storage or Root
             BuildTree(childNode);
         }
         parent.children.push_back(childNode);
     }
 }
 
-// Metadata Extraction 
+// --- Metadata & Utils ---
 
 void MSIFile::ParseSummaryInformation()
 {
+    // Look for "\005SummaryInformation"
     for (auto* entry : linearDirList) {
         if (entry->name.find(u"SummaryInformation") == std::u16string::npos)
             continue;
 
         bool isMini = entry->data.streamSize < header.miniStreamCutoffSize;
         Buffer buf  = GetStream(entry->data.startingSectorLocation, entry->data.streamSize, isMini);
-
-        size_t bufLen       = buf.GetLength();
-        const uint8_t* data = buf.GetData();
-        if (bufLen < 48) {
+        if (buf.GetLength() < 48)
             return;
-        }
 
-        msiMeta.totalSize = static_cast<uint64_t>(bufLen);
+        msiMeta.totalSize   = static_cast<uint64_t>(buf.GetLength());
+        const uint8_t* data = buf.GetData();
+        size_t bufLen       = buf.GetLength();
 
         uint32_t sectionOffset = 0;
-        if (!read_u32_le(data + 44, (bufLen >= 44) ? (bufLen - 44) : 0, sectionOffset))
+        // Read offset to first section (Property Set)
+        if (!read_u32_le(data + 44, (bufLen >= 44 ? bufLen - 44 : 0), sectionOffset))
             return;
+
         if (sectionOffset >= bufLen)
             return;
 
@@ -250,224 +285,129 @@ void MSIFile::ParseSummaryInformation()
             return;
 
         uint32_t propertyCount = 0;
-        if (!read_u32_le(sectionStart + 4, sectionAvail >= 4 ? (sectionAvail - 4) : 0, propertyCount))
+        if (!read_u32_le(sectionStart + 4, sectionAvail - 4, propertyCount))
             return;
 
         const uint8_t* propertyList = sectionStart + 8;
         size_t propertyListAvail    = (sectionAvail > 8) ? (sectionAvail - 8) : 0;
 
-        if (propertyCount > (propertyListAvail / 8)) {
-            propertyCount = static_cast<uint32_t>(propertyListAvail / 8);
-        }
+        // Validate count against available size
+        if (propertyCount > propertyListAvail / 8)
+            propertyCount = (uint32) (propertyListAvail / 8);
 
         for (uint32_t i = 0; i < propertyCount; ++i) {
-            size_t plOffset = static_cast<size_t>(i) * 8;
-            if (plOffset + 8 > propertyListAvail)
-                break; // safety
+            const uint8_t* plEntry = propertyList + (i * 8);
+            uint32_t propID = 0, propOffset = 0;
 
-            const uint8_t* plEntry = propertyList + plOffset;
-            uint32_t propID        = 0;
-            uint32_t propOffset    = 0;
-            if (!read_u32_le(plEntry, propertyListAvail - plOffset, propID))
-                continue;
-            if (!read_u32_le(plEntry + 4, propertyListAvail - plOffset - 4, propOffset))
-                continue;
+            read_u32_le(plEntry, 8, propID);
+            read_u32_le(plEntry + 4, 4, propOffset);
 
-            // valuePtr = sectionStart + propOffset
             if (propOffset >= sectionAvail)
                 continue;
+
             const uint8_t* valuePtr = sectionStart + propOffset;
             size_t valueAvail       = sectionAvail - propOffset;
-            if (valueAvail < 4) // minimum 4 bytes for type
+            if (valueAvail < 4)
                 continue;
 
-            uint32_t rawType = 0;
-            if (!read_u32_le(valuePtr, valueAvail, rawType))
-                continue;
-            uint32_t type = rawType & 0xFFFFu;
+            uint32_t type = 0;
+            read_u32_le(valuePtr, 4, type);
+            type &= 0xFFFF; // Mask to VT type
 
             switch (type) {
-            case 30: { // VT_LPSTR (ANSI bytes)
-                std::string value = parse_lpstr(valuePtr, valueAvail);
-                switch (propID) {
-                case 2:
-                    msiMeta.title = value;
-                    break;
-                case 3:
-                    msiMeta.subject = value;
-                    break;
-                case 4:
-                    msiMeta.author = value;
-                    break;
-                case 5:
-                    msiMeta.keywords = value;
-                    break;
-                case 6:
-                    msiMeta.comments = value;
-                    break;
-                case 7:
-                    msiMeta.templateStr = value;
-                    break;
-                case 8:
-                    msiMeta.lastSavedBy = value;
-                    break;
-                case 9:
-                    msiMeta.revisionNumber = value;
-                    break;
-                case 18:
-                    msiMeta.creatingApp = value;
-                    break;
-                default:
-                    break;
+            case 30: // VT_LPSTR
+                if (propID == 2)
+                    msiMeta.title = ParseLpstr(valuePtr, valueAvail);
+                else if (propID == 3)
+                    msiMeta.subject = ParseLpstr(valuePtr, valueAvail);
+                else if (propID == 4)
+                    msiMeta.author = ParseLpstr(valuePtr, valueAvail);
+                else if (propID == 5)
+                    msiMeta.keywords = ParseLpstr(valuePtr, valueAvail);
+                else if (propID == 6)
+                    msiMeta.comments = ParseLpstr(valuePtr, valueAvail);
+                else if (propID == 9)
+                    msiMeta.revisionNumber = ParseLpstr(valuePtr, valueAvail);
+                else if (propID == 18)
+                    msiMeta.creatingApp = ParseLpstr(valuePtr, valueAvail);
+                break;
+            case 64: // VT_FILETIME
+            {
+                uint64_t ft = 0;
+                if (read_u64_le(valuePtr + 4, valueAvail - 4, ft)) {
+                    filetime_to_time_t(ft, (propID == 12 ? msiMeta.createTime : (propID == 13 ? msiMeta.lastSaveTime : msiMeta.lastPrintedTime)));
                 }
                 break;
             }
-
-            case 31: { // VT_LPWSTR (UTF-16LE)
-                std::string value = parse_lpwstr(valuePtr, valueAvail);
-                switch (propID) {
-                case 2:
-                    msiMeta.title = value;
-                    break;
-                case 3:
-                    msiMeta.subject = value;
-                    break;
-                case 4:
-                    msiMeta.author = value;
-                    break;
-                case 5:
-                    msiMeta.keywords = value;
-                    break;
-                case 6:
-                    msiMeta.comments = value;
-                    break;
-                case 7:
-                    msiMeta.templateStr = value;
-                    break;
-                case 8:
-                    msiMeta.lastSavedBy = value;
-                    break;
-                case 9:
-                    msiMeta.revisionNumber = value;
-                    break;
-                case 18:
-                    msiMeta.creatingApp = value;
-                    break;
-                default:
-                    break;
+            case 2:                // VT_I2
+                if (propID == 1) { /* Codepage logic if needed */
                 }
                 break;
+            case 3: // VT_I4
+            {
+                uint32_t v = 0;
+                read_u32_le(valuePtr + 4, valueAvail - 4, v);
+                if (propID == 14)
+                    msiMeta.pageCount = v;
+                else if (propID == 15)
+                    msiMeta.wordCount = v;
+                else if (propID == 19)
+                    msiMeta.security = v;
+            } break;
             }
-
-            case 2: { // VT_I2 (usually Codepage)
-                if (valueAvail >= 6) {
-                    uint16_t v16 = 0;
-                    if (read_u16_le(valuePtr + 4, valueAvail - 4, v16)) {
-                        msiMeta.codepage = v16;
-                    }
-                }
-                break;
-            }
-
-            case 3: { // VT_I4 (32-bit integer)
-                if (valueAvail >= 8) {
-                    uint32_t v32 = 0;
-                    if (read_u32_le(valuePtr + 4, valueAvail - 4, v32)) {
-                        switch (propID) {
-                        case 14:
-                            msiMeta.pageCount = v32;
-                            break;
-                        case 15:
-                            msiMeta.wordCount = v32;
-                            break;
-                        case 16:
-                            msiMeta.characterCount = v32;
-                            break;
-                        case 19:
-                            msiMeta.security = v32;
-                            break;
-                        default:
-                            break;
-                        }
-                    }
-                }
-                break;
-            }
-
-            case 64: { // VT_FILETIME (64-bit at offset+4)
-                if (valueAvail >= 12) {
-                    uint64_t ft = 0;
-                    if (read_u64_le(valuePtr + 4, valueAvail - 4, ft)) {
-                        std::time_t t = 0;
-                        if (filetime_to_time_t(ft, t)) {
-                            switch (propID) {
-                            case 11:
-                                msiMeta.lastPrintedTime = t;
-                                break;
-                            case 12:
-                                msiMeta.createTime = t;
-                                break;
-                            case 13:
-                                msiMeta.lastSaveTime = t;
-                                break;
-                            default:
-                                break;
-                            }
-                        }
-                    }
-                }
-                break;
-            }
-
-            default:
-                break;
-            } 
-        } 
-
-        break;
-    } 
+        }
+        break; // Only parse the first section
+    }
 }
 
-// --- MSI Decoding Helper ---
-
-// [FIX] Correct Base62 Decoding for MSI
 std::u16string MSIFile::MsiDecompressName(std::u16string_view encoded)
 {
-    // MSI Base62 Charset (0-63)
-    // 0-9, A-Z, a-z, ., _
     static const char16_t charset[] = u"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz._";
-
     std::u16string result;
     result.reserve(encoded.length() * 2);
 
     for (size_t i = 0; i < encoded.length(); ++i) {
         uint16_t val = (uint16_t) encoded[i];
-
         if (val >= 0x3800 && val <= 0x47FF) {
             uint16_t packed = val - 0x3800;
-            result += charset[packed & 0x3F];        // Lower 6 bits
-            result += charset[(packed >> 6) & 0x3F]; // Upper 6 bits
-        }
-        else if (val >= 0x4800 && val <= 0x483F) {
-            uint16_t index = val - 0x4800;
-            result += charset[index];
-        }
-        else if (val == 0x4840) {
+            result += charset[packed & 0x3F];
+            result += charset[(packed >> 6) & 0x3F];
+        } else if (val >= 0x4800 && val <= 0x483F) {
+            result += charset[val - 0x4800];
+        } else if (val == 0x4840) {
             result += u'!';
-        }
-        else {
+        } else {
             result += (char16_t) val;
         }
     }
-
     return result;
 }
 
-// --- Viewer Interface ---
+void MSIFile::SizeToString(uint64 value, std::string& result)
+{
+    const char* units[] = { "Bytes", "KB", "MB", "GB", "TB" };
+    int unitIndex       = 0;
+    double doubleValue  = static_cast<double>(value);
+
+    while (doubleValue >= 1024.0 && unitIndex < 4) {
+        doubleValue /= 1024.0;
+        unitIndex++;
+    }
+
+    char buffer[32];
+    if (unitIndex == 0)
+        snprintf(buffer, sizeof(buffer), "%llu %s", value, units[unitIndex]);
+    else
+        snprintf(buffer, sizeof(buffer), "%.2f %s", doubleValue, units[unitIndex]);
+
+    result = buffer;
+}
+
+// --- Viewer & GView Interface ---
 
 bool MSIFile::BeginIteration(std::u16string_view path, AppCUI::Controls::TreeViewItem parent)
 {
-    // Mode 1: Database View
+    // Mode 1: Parsed Database Files
     if (!msiFiles.empty()) {
         if (path.empty()) {
             currentIterIndex = 0;
@@ -476,7 +416,7 @@ bool MSIFile::BeginIteration(std::u16string_view path, AppCUI::Controls::TreeVie
         return false;
     }
 
-    // Mode 2: Raw Stream View
+    // Mode 2: Raw OLE Streams
     currentIterIndex = 0;
     if (path.empty())
         currentIterFolder = &rootDir;
@@ -492,14 +432,17 @@ bool MSIFile::PopulateItem(AppCUI::Controls::TreeViewItem item)
     if (!msiFiles.empty()) {
         if (currentIterIndex >= msiFiles.size())
             return false;
+
         const auto& file = msiFiles[currentIterIndex];
         item.SetText(0, file.Name);
         item.SetText(1, file.Directory);
         item.SetText(2, file.Component);
-        LocalString<32> sz;
-        sz.Format("%u", file.Size);
-        item.SetText(3, sz);
+
+        std::string sizeStr;
+        SizeToString(file.Size, sizeStr);
+        item.SetText(3, sizeStr);
         item.SetText(4, file.Version);
+
         currentIterIndex++;
         return true;
     }
@@ -508,20 +451,18 @@ bool MSIFile::PopulateItem(AppCUI::Controls::TreeViewItem item)
     if (!currentIterFolder || currentIterIndex >= currentIterFolder->children.size())
         return false;
 
-    DirEntry* child = &currentIterFolder->children[currentIterIndex];
-    currentIterIndex++;
+    DirEntry* child = &currentIterFolder->children[currentIterIndex++];
 
     item.SetText(0, child->decodedName);
 
     if (child->data.objectType == 1 || child->data.objectType == 5) {
         item.SetText(1, "Folder");
-        item.SetText(2, "");
         item.SetExpandable(true);
     } else {
         item.SetText(1, "Stream");
-        LocalString<32> sz;
-        sz.Format("%llu", child->data.streamSize);
-        item.SetText(2, sz);
+        std::string s;
+        SizeToString(child->data.streamSize, s);
+        item.SetText(2, s);
         item.SetExpandable(false);
     }
 
@@ -543,8 +484,9 @@ GView::Utils::JsonBuilderInterface* MSIFile::GetSmartAssistantContext(const std:
 {
     auto builder = GView::Utils::JsonBuilderInterface::Create();
     builder->AddString("Type", "Microsoft Installer (MSI)");
-    builder->AddUInt("Streams", (uint32) linearDirList.size());
-    builder->AddUInt("TablesFound", (uint32) tables.size());
+    builder->AddUInt("StreamsCount", (uint32) linearDirList.size());
+    builder->AddUInt("TablesCount", (uint32) tables.size());
+    builder->AddString("ProductTitle", msiMeta.title);
     return builder;
 }
 
@@ -555,17 +497,13 @@ void MSIFile::UpdateBufferViewZones(GView::View::BufferViewer::Settings& setting
         SectorTranslator(uint32 size) : sSize(size)
         {
         }
-
-        uint64_t TranslateToFileOffset(uint64 value, uint32 fromTranslationIndex) override
+        uint64_t TranslateToFileOffset(uint64 value, uint32) override
         {
             return (uint64_t) (value + 1) * sSize;
         }
-
-        uint64_t TranslateFromFileOffset(uint64 value, uint32 toTranslationIndex) override
+        uint64_t TranslateFromFileOffset(uint64 value, uint32) override
         {
-            if (value < 512)
-                return 0;
-            return (value / sSize) - 1;
+            return (value < 512) ? 0 : (value / sSize) - 1;
         }
     };
 
@@ -573,113 +511,43 @@ void MSIFile::UpdateBufferViewZones(GView::View::BufferViewer::Settings& setting
     settings.SetEndianess(GView::Dissasembly::Endianess::Little);
     settings.SetOffsetTranslationList({ "Sector" }, new SectorTranslator(this->sectorSize));
 
-    // ID 0: Header
-    settings.AddBookmark(0, 0);
-
-    // ID 1: Directory
+    settings.AddBookmark(0, 0); // Header
     if (header.firstDirSector != ENDOFCHAIN)
         settings.AddBookmark(1, (uint64) (header.firstDirSector + 1) * sectorSize);
 
-    // ID 2: FAT 
-    if (header.difat[0] != ENDOFCHAIN && header.difat[0] != NOSTREAM) {
-        settings.AddBookmark(2, (uint64) (header.difat[0] + 1) * sectorSize);
-    } else if (header.firstDifatSector != ENDOFCHAIN) {
-        settings.AddBookmark(2, (uint64) (header.firstDifatSector + 1) * sectorSize);
-    }
-
-    // ID 3: MiniFAT
-    if (header.firstMiniFatSector != ENDOFCHAIN)
-        settings.AddBookmark(3, (uint64) (header.firstMiniFatSector + 1) * sectorSize);
-
-    // ID 4: Root Entry Data (MiniStream Storage)
-    if (!linearDirList.empty() && linearDirList[0]->data.startingSectorLocation != ENDOFCHAIN) {
-        // Verificați că Root Entry are date
-        uint32 rootSect = linearDirList[0]->data.startingSectorLocation;
-        if (rootSect < 0xFFFFFFFA) {
-            settings.AddBookmark(4, (uint64) (rootSect + 1) * sectorSize);
-        }
-    }
-
-    // ID 5+: Only Big Streams
-    for (auto* entry : linearDirList) {
-        if (entry->data.streamSize < header.miniStreamCutoffSize || entry->data.streamSize == 0)
-            continue;
-
-        std::u16string dName = MsiDecompressName(entry->name);
-
-        if (dName.find(u"DigitalSignature") != std::u16string::npos) {
-            settings.AddBookmark(5, (uint64) (entry->data.startingSectorLocation + 1) * sectorSize);
-        }
-    }
-
-    auto addSectorZone = [&](uint32 sect, ColorPair col, std::string_view name) {
-        if (sect >= 0xFFFFFFFA)
+    auto addMergedZones = [&](std::vector<uint32>& sectors, ColorPair col, std::string_view baseName) {
+        if (sectors.empty())
             return;
-        settings.AddZone((uint64) (sect + 1) * sectorSize, sectorSize, col, name);
+        std::sort(sectors.begin(), sectors.end());
+
+        uint64 start = sectors[0], count = 1;
+        for (size_t i = 1; i < sectors.size(); i++) {
+            if (sectors[i] == start + count) {
+                count++;
+            } else {
+                settings.AddZone((start + 1) * sectorSize, count * sectorSize, col, baseName);
+                start = sectors[i];
+                count = 1;
+            }
+        }
+        settings.AddZone((start + 1) * sectorSize, count * sectorSize, col, baseName);
     };
 
-    settings.AddZone(0, 512, ColorPair{ Color::White, Color::Magenta }, "Header");
-
-    // DIFAT & FAT
+    // FAT Sectors
     std::vector<uint32> fatSectors;
     for (int i = 0; i < 109; i++)
         if (header.difat[i] < 0xFFFFFFFA)
             fatSectors.push_back(header.difat[i]);
+    addMergedZones(fatSectors, { Color::Green, Color::Black }, "FAT Sector");
 
-    uint32 currDifat = header.firstDifatSector;
-    uint32 safety    = 0;
-    while (currDifat < 0xFFFFFFFA && safety++ < 1000) {
-        addSectorZone(currDifat, ColorPair{ Color::Red, Color::Black }, "DIFAT Sector");
-        auto view = this->obj->GetData().Get((uint64) (currDifat + 1) * sectorSize, sectorSize, true);
-        if (!view.IsValid())
-            break;
-        const uint32* ptr = reinterpret_cast<const uint32*>(view.GetData());
-        for (uint32 k = 0; k < (sectorSize / 4) - 1; k++)
-            if (ptr[k] < 0xFFFFFFFA)
-                fatSectors.push_back(ptr[k]);
-        currDifat = ptr[(sectorSize / 4) - 1];
+    // Directory
+    std::vector<uint32> dirSectors;
+    uint32 s = header.firstDirSector;
+    while (s < FAT.size()) {
+        dirSectors.push_back(s);
+        s = FAT[s];
     }
+    addMergedZones(dirSectors, { Color::Olive, Color::Black }, "Directory Sector");
 
-    for (auto sect : fatSectors)
-        addSectorZone(sect, ColorPair{ Color::Green, Color::Black }, "FAT Sector");
-
-    // Directory & MiniFAT
-    uint32 ds = header.firstDirSector;
-    safety    = 0;
-    while (ds < FAT.size() && safety++ < 5000) {
-        addSectorZone(ds, ColorPair{ Color::Olive, Color::Black }, "Directory Sector");
-        ds = FAT[ds];
-    }
-
-    uint32 mfs = header.firstMiniFatSector;
-    safety     = 0;
-    while (mfs < FAT.size() && safety++ < 5000) {
-        addSectorZone(mfs, ColorPair{ Color::Teal, Color::Black }, "MiniFAT Sector");
-        mfs = FAT[mfs];
-    }
-
-    // Streams
-    for (auto* entry : linearDirList) {
-        if (entry->data.streamSize < header.miniStreamCutoffSize)
-            continue;
-
-        std::u16string dName = MsiDecompressName(entry->name);
-        AppCUI::Utils::String temp;
-        temp.Set(dName);
-
-        ColorPair cp = { Color::White, Color::DarkBlue };
-        if (dName.find(u"SummaryInformation") != std::u16string::npos)
-            cp = { Color::Yellow, Color::Black };
-        else if (!dName.empty() && dName[0] == u'!')
-            cp = { Color::Aqua, Color::Black };
-        else if (dName == u"Root Entry")
-            cp = { Color::Gray, Color::Black };
-
-        uint32 s     = entry->data.startingSectorLocation;
-        uint32 limit = 0;
-        while (s < FAT.size() && limit++ < 10000) {
-            addSectorZone(s, cp, temp.GetText());
-            s = FAT[s];
-        }
-    }
+    settings.AddZone(0, 512, { Color::White, Color::Magenta }, "Header");
 }
