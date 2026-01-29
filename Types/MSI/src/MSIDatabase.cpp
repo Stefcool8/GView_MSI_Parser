@@ -434,30 +434,25 @@ const MsiTableDef* MSIFile::GetTableDefinition(const std::string& tableName) con
 
 std::string MSIFile::ParseLpstr(const uint8_t* ptr, size_t avail)
 {
-    if (avail == 0)
-        return "";
-    uint32_t len = 0;
-    // Length is usually a DWORD before the string, but in SummaryInfo property variant,
-    // VT_LPSTR includes a 4-byte count.
-    // The pointer passed from ParseSummaryInformation points to the count.
-
-    if (avail < 4)
-        return "";
-    len = *(const uint32_t*) ptr;
-
-    // Safety check length
-    if (len > avail - 4)
-        len = (uint32_t) (avail - 4);
-    if (len == 0)
+    if (avail < 8)
         return "";
 
-    // If string is null-terminated in buffer, substr handles it if we stop early,
-    // but typically the count includes the null or it doesn't.
-    // VT_LPSTR is often null-terminated.
+    uint32_t stringLen = 0;
+    if (!read_u32_le(ptr + 4, avail - 4, stringLen))
+        return "";
 
-    std::string s((const char*) (ptr + 4), len);
-    if (!s.empty() && s.back() == '\0')
+    if (stringLen == 0)
+        return "";
+
+    if (stringLen > (avail - 8))
+        stringLen = static_cast<uint32_t>(avail - 8);
+
+    std::string s(reinterpret_cast<const char*>(ptr + 8), stringLen);
+
+    while (!s.empty() && s.back() == '\0') {
         s.pop_back();
+    }
+
     return s;
 }
 
