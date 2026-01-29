@@ -144,38 +144,80 @@ bool MSIFile::LoadDatabase()
         Buffer buf  = GetStream(columnsEntry->data.startingSectorLocation, columnsEntry->data.streamSize, isMini);
 
         if (buf.GetLength() > 0) {
+            // 1. Calculate Dimensions
             uint32 colRowSize = (this->stringBytes * 2) + 4;
             uint32 numRows    = buf.GetLength() / colRowSize;
             const uint8* ptr  = buf.GetData();
 
-            // Calculate Start Offsets for !_Columns (Column-Oriented)
-            // Layout: [Table Name Strings...] [Col Numbers...] [Col Name Strings...] [Types...]
+            // 2. Calculate Block Start Offsets (Column-Oriented)
+            // Block 1: Table Names (String Indices)
             uint32 startTable = 0;
-            uint32 startNum   = startTable + (numRows * stringBytes);
-            uint32 startName  = startNum + (numRows * 2);
-            uint32 startType  = startName + (numRows * stringBytes);
 
+            // Block 2: Column Numbers (2-byte Integers)
+            uint32 startNum = startTable + (numRows * stringBytes);
+
+            // Block 3: Column Names (String Indices)
+            uint32 startName = startNum + (numRows * 2);
+
+            // Block 4: Types (2-byte Integers)
+            uint32 startType = startName + (numRows * stringBytes);
+
+            // 3. Iterate Rows by jumping between blocks
             for (uint32 i = 0; i < numRows; i++) {
-                // Table Name
+                uint32 offset = i * colRowSize;
+                // Read Table Name (From Block 1)
                 uint32 offsetTable = startTable + (i * stringBytes);
-                uint32 tableIdx =
-                      (stringBytes == 2) ? *(uint16*) (ptr + offsetTable) : (ptr[offsetTable] | (ptr[offsetTable + 1] << 8) | (ptr[offsetTable + 2] << 16));
+                // Check bounds
+                if (offsetTable + stringBytes > buf.GetLength())
+                    break;
 
-                // Column Number
+                uint32 tableIdx = 0;
+                if (stringBytes == 2)
+                    tableIdx = *(uint16*) (ptr + offsetTable);
+                else
+                    tableIdx = ptr[offsetTable] | (ptr[offsetTable + 1] << 8) | (ptr[offsetTable + 2] << 16);
+
+                // Read Column Number (From Block 2)
                 uint32 offsetNum = startNum + (i * 2);
                 uint16 colNum    = *(uint16*) (ptr + offsetNum);
+                if (colNum & 0x8000) {
+                    colNum &= 0x7FFF; // Remove the high bit
+                }
 
-                // Column Name
+                // Read Column Name (From Block 3)
                 uint32 offsetName = startName + (i * stringBytes);
-                uint32 nameIdx =
-                      (stringBytes == 2) ? *(uint16*) (ptr + offsetName) : (ptr[offsetName] | (ptr[offsetName + 1] << 8) | (ptr[offsetName + 2] << 16));
+                uint32 nameIdx    = 0;
+                if (stringBytes == 2)
+                    nameIdx = *(uint16*) (ptr + offsetName);
+                else
+                    nameIdx = ptr[offsetName] | (ptr[offsetName + 1] << 8) | (ptr[offsetName + 2] << 16);
 
-                // Type
+                // Read Type (From Block 4)
                 uint32 offsetType = startType + (i * 2);
-                uint16 type       = *(uint16*) (ptr + offsetType);
+                uint16 diskType   = *(uint16*) (ptr + offsetType);
+
+                // [FIX 1] Handle "Over 32000" Mask
+                // Strip the 0x8000 bit (Nullable/Temp flag)
+                diskType &= 0x7FFF;
+
+                // Translate Disk Type to Internal Flags
+                int finalType = 0;
+                bool isString = (diskType & 0x0800) != 0;
+
+                if (!isString) {
+                    // It is an Integer
+                    finalType |= MSICOL_INTEGER;
+
+                    // Determine size from the lower nibble
+                    // 2 = i2 (2 bytes), 4 = i4 (4 bytes)
+                    if ((diskType & 0x0F) == 2) {
+                        finalType |= MSICOL_INT2;
+                    }
+                }
+                // Else it remains 0 (String), which is the default.
 
                 std::string tableNameStr = GetString(tableIdx);
-                std::string colNameStr   = GetString(tableIdx + offsetName);
+                std::string colNameStr   = GetString(nameIdx);
 
                 if (tableNameStr.empty() || tableNameStr == "<Error>")
                     continue;
@@ -184,7 +226,7 @@ bool MSIFile::LoadDatabase()
 
                 MsiTableDef& def = tableDefs[tableNameStr];
                 def.name         = tableNameStr;
-                MsiColumnInfo col{ colNameStr, (int) type, 0, 0 };
+                MsiColumnInfo col{ colNameStr, (int) finalType, 0, 0 };
 
                 if (def.columns.size() < (size_t) colNum)
                     def.columns.resize(colNum);
@@ -192,51 +234,23 @@ bool MSIFile::LoadDatabase()
             }
         }
     }
-
-    // 3. Override Critical Tables (Fail-Safe Schema)
-    // We enforce the correct schema for File, Directory, and Component to prevent parsing errors
-    // from custom flags or corrupted types in the MSI metadata.
-
-    MsiTableDef fileDef;
-    fileDef.name      = "File";
-    fileDef.columns   = { { "File", 0, 0, 0 },    { "Component_", 0, 0, 0 }, { "FileName", 0, 0, 0 },        { "FileSize", 0x8004, 0, 0 },
-                          { "Version", 0, 0, 0 }, { "Language", 0, 0, 0 },   { "Attributes", 0x8002, 0, 0 }, { "Sequence", 0x8004, 0, 0 } };
-    tableDefs["File"] = fileDef;
-
-    MsiTableDef dirDef;
-    dirDef.name            = "Directory";
-    dirDef.columns         = { { "Directory", 0, 0, 0 }, { "Directory_Parent", 0, 0, 0 }, { "DefaultDir", 0, 0, 0 } };
-    tableDefs["Directory"] = dirDef;
-
-    MsiTableDef compDef;
-    compDef.name           = "Component";
-    compDef.columns        = { { "Component", 0, 0, 0 },       { "ComponentId", 0, 0, 0 }, { "Directory_", 0, 0, 0 },
-                               { "Attributes", 0x8002, 0, 0 }, { "Condition", 0, 0, 0 },   { "KeyPath", 0, 0, 0 } };
-    tableDefs["Component"] = compDef;
-
-    // 4. Calculate Column Sizes
-    // Note: In Column-Oriented storage, we only need the size to calculate the total block size.
+    // 4. Calculate Column Sizes & Row Width
     for (auto& [name, def] : tableDefs) {
         uint32 rowWidth = 0;
         for (auto& col : def.columns) {
-            bool isInt = (col.type & MSICOL_INTEGER) != 0;
-            // Fixup logic for missing flags based on known bitmasks
-            if (!isInt) {
-                if ((col.type & 0xF) == 4 && col.type < 0x2000) {
-                    isInt    = true;
-                    col.size = 4;
-                    col.type |= MSICOL_INTEGER;
-                } else if ((col.type & 0xF) == 2 && col.type < 0x2000) {
-                    isInt    = true;
-                    col.size = 2;
-                    col.type |= (MSICOL_INTEGER | MSICOL_INT2);
-                }
-            }
+            // We now TRUST the parser flags (MSICOL_INTEGER), so no heuristic fixups are needed.
 
-            if (isInt)
-                col.size = ((col.type & 0xF) > 0) ? (col.type & 0xF) : ((col.type & MSICOL_INT2) ? 2 : 4);
-            else
+            if (col.type & MSICOL_INTEGER) {
+                // Check our internal flag for 2-byte vs 4-byte
+                if (col.type & MSICOL_INT2) {
+                    col.size = 2;
+                } else {
+                    col.size = 4;
+                }
+            } else {
+                // It is a string (flag 0x0200 was set on disk)
                 col.size = stringBytes;
+            }
 
             rowWidth += col.size;
         }
