@@ -1,7 +1,7 @@
 target_sources(MSI PRIVATE 
+	Dialogs.cpp
 	msi.cpp
 	MSIDatabase.cpp
 	MSIFile.cpp
-	PanelInformation.cpp
-	TableViewer.cpp
+	Panels.cpp
 )
