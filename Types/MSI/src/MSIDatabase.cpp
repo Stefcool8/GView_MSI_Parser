@@ -192,31 +192,34 @@ bool MSIFile::LoadDatabase()
 
                 // Read Type (From Block 4)
                 uint32 offsetType = startType + (i * 2);
-                // uint16 type       = *(uint16*) (ptr + offsetType);
+                uint16 diskType   = *(uint16*) (ptr + offsetType);
 
+                // [FIX 1] Handle "Over 32000" Mask
+                // Strip the 0x8000 bit (Nullable/Temp flag)
+                diskType &= 0x7FFF;
 
                 // Translate Disk Type to Internal Flags
                 int finalType = 0;
-                if ((startType & 0x0200) == 0) { // Bit 9 is 0 -> Integer
+                bool isString = (diskType & 0x0800) != 0;
+
+                if (!isString) {
+                    // It is an Integer
                     finalType |= MSICOL_INTEGER;
-                    if ((startType & 0x0F) == 2) {
+
+                    // Determine size from the lower nibble
+                    // 2 = i2 (2 bytes), 4 = i4 (4 bytes)
+                    if ((diskType & 0x0F) == 2) {
                         finalType |= MSICOL_INT2;
                     }
-                    // Else implies 4 bytes (standard int)
-                } else {
-                    // Bit 9 is 1 -> String (finalType 0 means string by default in your struct)
                 }
-                if (finalType & 0x8000) {
-                    finalType &= 0x7FFF; // Remove the high bit
-                }
-
+                // Else it remains 0 (String), which is the default.
 
                 std::string tableNameStr = GetString(tableIdx);
                 std::string colNameStr   = GetString(nameIdx);
 
                 if (tableNameStr.empty() || tableNameStr == "<Error>")
                     continue;
-                if (colNum == 0 && colNum > 255)
+                if (colNum == 0 || colNum > 255)
                     continue;
 
                 MsiTableDef& def = tableDefs[tableNameStr];
