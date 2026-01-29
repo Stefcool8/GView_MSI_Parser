@@ -432,14 +432,6 @@ const MsiTableDef* MSIFile::GetTableDefinition(const std::string& tableName) con
     return nullptr;
 }
 
-static bool read_u32_le(const uint8_t* data, size_t avail, uint32_t& out)
-{
-    if (avail < 4)
-        return false;
-    out = (uint32_t) data[0] | ((uint32_t) data[1] << 8) | ((uint32_t) data[2] << 16) | ((uint32_t) data[3] << 24);
-    return true;
-}
-
 std::string MSIFile::ParseLpstr(const uint8_t* ptr, size_t avail)
 {
     if (avail < 8)
