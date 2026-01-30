@@ -56,8 +56,8 @@ struct DirectoryEntryData {
 #pragma pack(pop)
 
 struct DirEntry {
-    uint32 id;
-    DirectoryEntryData data;
+    uint32 id               = 0;
+    DirectoryEntryData data = {};
     std::vector<DirEntry> children;
     std::u16string name;        // Raw name from Entry
     std::u16string decodedName; // Decoded MSI name for display
@@ -67,7 +67,7 @@ struct MsiFileEntry {
     std::string Name;
     std::string Directory;
     std::string Component;
-    uint32 Size;
+    uint32 Size = 0;
     std::string Version;
 };
 
