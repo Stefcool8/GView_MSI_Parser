@@ -72,6 +72,7 @@ void Information::UpdateGeneralInformation()
     add("Mini Sector Size", std::to_string(msi->miniSectorSize) + " bytes");
 
     add("Codepage", std::to_string(meta.codepage));
+    add("Security", std::to_string(meta.security));
 }
 
 void Information::OnAfterResize(int newWidth, int newHeight)
