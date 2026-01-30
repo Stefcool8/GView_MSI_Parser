@@ -257,6 +257,8 @@ void MSIFile::ParseSummaryInformation()
 
         bool isMini = entry->data.streamSize < header.miniStreamCutoffSize;
         Buffer buf  = GetStream(entry->data.startingSectorLocation, entry->data.streamSize, isMini);
+
+        // Property Set Minimum Size
         if (buf.GetLength() < 48)
             return;
 

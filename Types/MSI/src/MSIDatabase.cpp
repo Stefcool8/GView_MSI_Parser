@@ -453,8 +453,3 @@ std::string MSIFile::ParseLpstr(const uint8_t* ptr, size_t avail)
     return s;
 }
 
-// Helper needed by some parsers, but unused in current simplified logic
-std::string MSIFile::ParseLpwstr(const uint8_t* ptr, size_t avail)
-{
-    return "";
-}
