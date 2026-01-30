@@ -226,7 +226,7 @@ bool MSIFile::LoadDatabase()
 
                 MsiTableDef& def = tableDefs[tableNameStr];
                 def.name         = tableNameStr;
-                MsiColumnInfo col{ colNameStr, (int) finalType, 0, 0 };
+                MsiColumnInfo col{ colNameStr, (int) finalType, 0 };
 
                 if (def.columns.size() < (size_t) colNum)
                     def.columns.resize(colNum);
@@ -258,7 +258,7 @@ bool MSIFile::LoadDatabase()
     }
 
     // 5. Populate Files Panel
-    if (tableDefs.count("File")) {
+    if (tableDefs.find("File") != tableDefs.end()) {
         msiFiles.clear();
 
         // Load Directories
@@ -289,7 +289,7 @@ bool MSIFile::LoadDatabase()
         // Path Resolution Helper
         std::map<std::string, std::string> pathCache;
         std::function<std::string(std::string)> resolvePath = [&](std::string key) -> std::string {
-            if (pathCache.count(key))
+            if (pathCache.find(key) != pathCache.end())
                 return pathCache[key];
             if (dirStructure.find(key) == dirStructure.end())
                 return key;
@@ -317,7 +317,7 @@ bool MSIFile::LoadDatabase()
             }
             entry.Version = std::string(row[4].GetText());
 
-            if (compToDir.count(entry.Component))
+            if (compToDir.find(entry.Component) != compToDir.end())
                 entry.Directory = resolvePath(compToDir[entry.Component]);
             else
                 entry.Directory = "<Orphaned>";
@@ -343,7 +343,7 @@ bool MSIFile::LoadTables()
 
         if (stream && def.rowSize > 0)
             count = (uint32) (stream->data.streamSize / def.rowSize);
-        tables.push_back({ name, "Table", count });
+        tables.push_back({ name, count });
     }
     return true;
 }
@@ -400,20 +400,21 @@ std::vector<std::vector<AppCUI::Utils::String>> MSIFile::ReadTableData(const std
 
             if (col.type & MSICOL_INTEGER) {
                 uint32 val = 0;
-                if (col.size == 2)
+                if (col.size == 2) {
                     val = *(uint16*) (ptr + valOffset);
-                else
+                    // Mask high bit (MSI internal flag)
+                    val &= 0x7FFF;
+                }
+                else {
                     val = *(uint32*) (ptr + valOffset);
-
-                // Mask high bit for large integers (MSI internal flag)
-                if (col.size == 4)
                     val &= 0x7FFFFFFF;
+                }
 
                 row.emplace_back(std::to_string(val).c_str());
             } else {
                 uint32 strIdx = 0;
                 if (stringBytes == 2)
-                    strIdx = *(uint16*) (ptr + valOffset);
+                    strIdx = *(uint16*) (ptr + valOffset); 
                 else
                     strIdx = ptr[valOffset] | (ptr[valOffset + 1] << 8) | (ptr[valOffset + 2] << 16);
                 row.emplace_back(GetString(strIdx).c_str());
