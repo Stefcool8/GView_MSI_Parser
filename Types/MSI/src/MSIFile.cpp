@@ -399,71 +399,148 @@ void MSIFile::SizeToString(uint64 value, std::string& result)
 
 bool MSIFile::BeginIteration(std::u16string_view path, AppCUI::Controls::TreeViewItem parent)
 {
-    // Mode 1: Parsed Database Files
-    if (!msiFiles.empty()) {
-        if (path.empty()) {
-            currentIterIndex = 0;
-            return true;
-        }
-        return false;
+    currentIterIndex = 0;
+
+    if (path.empty()) {
+        currentViewMode = ViewMode::Root;
+        return true;
     }
 
-    // Mode 2: Raw OLE Streams
-    currentIterIndex = 0;
-    if (path.empty())
-        currentIterFolder = &rootDir;
-    else
-        currentIterFolder = parent.GetData<DirEntry*>();
+    if (path == u"Files") {
+        currentViewMode = ViewMode::Files;
+        return true;
+    }
 
-    return currentIterFolder != nullptr;
+    if (path == u"Tables") {
+        currentViewMode = ViewMode::Tables;
+        return true;
+    }
+
+    if (path == u"Streams") {
+        currentViewMode   = ViewMode::Streams;
+        currentIterFolder = &rootDir;
+        return true;
+    }
+
+    if (parent.IsValid()) {
+        DirEntry* entry = parent.GetData<DirEntry*>();
+        if (entry) {
+            currentViewMode   = ViewMode::Streams;
+            currentIterFolder = entry;
+            return true;
+        }
+    }
+
+    return false;
 }
 
 bool MSIFile::PopulateItem(AppCUI::Controls::TreeViewItem item)
 {
-    // Mode 1: Parsed Files
-    if (!msiFiles.empty()) {
-        if (currentIterIndex >= msiFiles.size())
-            return false;
+    switch (currentViewMode) {
+    case ViewMode::Root:
+        if (currentIterIndex == 0) {
+            item.SetText(0, "Streams");
+            item.SetText(1, "Folder");
+            item.SetExpandable(true);
+            item.SetData<DirEntry>(nullptr); // Virtual
+            currentIterIndex++;
+            return true;
+        }
+        if (currentIterIndex == 1) {
+            item.SetText(0, "Files");
+            item.SetText(1, "Folder");
+            item.SetExpandable(true);
+            item.SetData<DirEntry>(nullptr); // Virtual
+            currentIterIndex++;
+            return true;
+        }
+        if (currentIterIndex == 2) {
+            item.SetText(0, "Tables");
+            item.SetText(1, "Folder");
+            item.SetExpandable(true);
+            item.SetData<DirEntry>(nullptr); // Virtual
+            currentIterIndex++;
+            return true;
+        }
+        break;
 
-        const auto& file = msiFiles[currentIterIndex];
-        item.SetText(0, file.Name);
-        item.SetText(1, file.Directory);
-        item.SetText(2, file.Component);
+    case ViewMode::Files:
+        if (currentIterIndex < msiFiles.size()) {
+            const auto& file = msiFiles[currentIterIndex];
+            item.SetText(0, file.Name);
+            item.SetText(1, file.Directory);
+            item.SetText(2, file.Component);
 
-        std::string sizeStr;
-        SizeToString(file.Size, sizeStr);
-        item.SetText(3, sizeStr);
-        item.SetText(4, file.Version);
+            std::string sizeStr;
+            SizeToString(file.Size, sizeStr);
+            item.SetText(3, sizeStr);
+            item.SetText(4, file.Version);
 
-        currentIterIndex++;
-        return true;
+            item.SetData<DirEntry>(nullptr); // It's a file, not a stream entry
+            item.SetExpandable(false);       // Files are leaves
+
+            currentIterIndex++;
+            return true;
+        }
+        break;
+
+    case ViewMode::Tables:
+        if (currentIterIndex < tables.size()) {
+            const auto& tbl = tables[currentIterIndex];
+            item.SetText(0, tbl.name);
+            item.SetText(1, "Table");
+            item.SetText(2, "");
+            item.SetText(3, std::to_string(tbl.rowCount) + " rows");
+
+            item.SetData<DirEntry>(nullptr);
+            item.SetExpandable(false);
+
+            currentIterIndex++;
+            return true;
+        }
+        break;
+
+    case ViewMode::Streams:
+        if (currentIterFolder && currentIterIndex < currentIterFolder->children.size()) {
+            DirEntry* child = &currentIterFolder->children[currentIterIndex];
+            item.SetText(0, child->decodedName);
+
+            if (child->data.objectType == 1 || child->data.objectType == 5) { // Storage/Root
+                item.SetText(1, "Folder");
+                item.SetExpandable(true);
+            } else {
+                item.SetText(1, "Stream");
+                std::string s;
+                SizeToString(child->data.streamSize, s);
+                item.SetText(2, ""); // Component empty
+                item.SetText(3, s);  // Size column
+                item.SetExpandable(false);
+            }
+
+            item.SetData<DirEntry>(child);
+            currentIterIndex++;
+            return true;
+        }
+        break;
     }
-
-    // Mode 2: Raw Streams
-    if (!currentIterFolder || currentIterIndex >= currentIterFolder->children.size())
-        return false;
-
-    DirEntry* child = &currentIterFolder->children[currentIterIndex++];
-
-    item.SetText(0, child->decodedName);
-
-    if (child->data.objectType == 1 || child->data.objectType == 5) {
-        item.SetText(1, "Folder");
-        item.SetExpandable(true);
-    } else {
-        item.SetText(1, "Stream");
-        std::string s;
-        SizeToString(child->data.streamSize, s);
-        item.SetText(2, s);
-        item.SetExpandable(false);
-    }
-
-    item.SetData<DirEntry>(child);
-    return true;
+    return false;
 }
 
 void MSIFile::OnOpenItem(std::u16string_view path, AppCUI::Controls::TreeViewItem item)
 {
+    // Handle opening a Table
+    if (path.starts_with(u"Tables/") || path.starts_with(u"Tables\\")) {
+        // item.GetText(0) contains the name.
+        std::u16string txt = item.GetText(0);
+        std::string tableName(txt.begin(), txt.end());
+
+        // Show the dialog
+        auto viewer = new Dialogs::TableViewer(this, tableName);
+        viewer->Show();
+        return;
+    }
+
+    // Handle opening a Stream
     auto e = item.GetData<DirEntry>();
     if (e && e->data.objectType == 2) {
         bool isMini    = e->data.streamSize < header.miniStreamCutoffSize;

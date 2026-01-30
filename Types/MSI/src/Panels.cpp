@@ -88,7 +88,7 @@ void Information::OnAfterResize(int newWidth, int newHeight)
 Tables::Tables(Reference<MSIFile> _msi) : TabPage("&Tables")
 {
     this->msi  = _msi;
-    this->list = Factory::ListView::Create(this, "x:0,y:0,w:100%,h:100%", { "n:Name,w:30", "n:Type,w:10", "n:Rows,w:10,a:r" }, ListViewFlags::None);
+    this->list = Factory::ListView::Create(this, "x:0,y:0,w:100%,h:100%", { "n:Name,w:30", "n:Rows,w:10,a:r" }, ListViewFlags::None);
 
     // Set the handler to process clicks
     this->list->Handlers()->OnItemPressed = this;
@@ -108,7 +108,7 @@ void Tables::Update()
         else
             rowStr.Format("%u", tbl.rowCount);
 
-        list->AddItem({ tbl.name, tbl.type, rowStr });
+        list->AddItem({ tbl.name, rowStr });
     }
 }
 

@@ -73,20 +73,18 @@ struct MsiFileEntry {
 
 struct MsiColumnInfo {
     std::string name;
-    int type;
-    int offset;
-    int size;
+    int type = 0;
+    int size = 0;
 };
 
 struct MsiTableDef {
     std::string name;
     std::vector<MsiColumnInfo> columns;
-    uint32 rowSize;
+    uint32 rowSize = 0;
 };
 
 struct MSITableInfo {
     std::string name;
-    std::string type;
     uint32 rowCount;
 };
 
@@ -143,6 +141,8 @@ class MSIFile : public TypeInterface, public View::ContainerViewer::EnumerateInt
     uint32 stringBytes = 2;
 
     // Iteration State (Container Viewer)
+    enum class ViewMode : uint8 { Root, Streams, Files, Tables };
+    ViewMode currentViewMode    = ViewMode::Root;
     DirEntry* currentIterFolder = nullptr;
     size_t currentIterIndex     = 0;
 
