@@ -169,7 +169,6 @@ class MSIFile : public TypeInterface,
 
     // Helpers
     std::string ParseLpstr(const uint8_t* ptr, size_t avail);
-    std::string ParseLpwstr(const uint8_t* ptr, size_t avail);
 
   public:
     MSIFile();
