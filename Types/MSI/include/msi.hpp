@@ -9,13 +9,13 @@
 
 namespace GView::Type::MSI
 {
-// --- Constants ---
+// Constants
 constexpr uint64 OLE_SIGNATURE = 0xE11AB1A1E011CFD0;
 constexpr uint32 FREESECT      = 0xFFFFFFFF;
 constexpr uint32 ENDOFCHAIN    = 0xFFFFFFFE;
 constexpr uint32 NOSTREAM      = 0xFFFFFFFF;
 
-// --- Data Structures ---
+// Data Structures 
 #pragma pack(push, 1)
 struct OLEHeader {
     uint64 signature;
@@ -23,14 +23,14 @@ struct OLEHeader {
     uint16 minorVersion;
     uint16 majorVersion;
     uint16 byteOrder;
-    uint16 sectorShift;
-    uint16 miniSectorShift;
+    uint16 sectorShift; // size of sectors in power-of-two, usually 9 or 12
+    uint16 miniSectorShift; // size of mini-sectors in power-of-two
     uint8 reserved[6];
     uint32 numDirSectors;
     uint32 numFatSectors;
     uint32 firstDirSector;
     uint32 transactionSignature;
-    uint32 miniStreamCutoffSize;
+    uint32 miniStreamCutoffSize; // maximum size for a mini-stream
     uint32 firstMiniFatSector;
     uint32 numMiniFatSectors;
     uint32 firstDifatSector;
@@ -41,12 +41,12 @@ struct OLEHeader {
 struct DirectoryEntryData {
     char16 name[32];
     uint16 nameLength;
-    uint8 objectType; // 0=Unknown 1=Storage, 2=Stream, 5=Root
-    uint8 colorFlag;
+    uint8 objectType; // 0=Unknown, 1=Storage, 2=Stream, 5=Root
+    uint8 colorFlag;  // 0=Red, 1=Black
     uint32 leftSiblingId;
     uint32 rightSiblingId;
     uint32 childId;
-    uint8 clsid[16];
+    uint8 clsid[16]; // GUID
     uint32 stateBits;
     uint64 creationTime;
     uint64 modifiedTime;
@@ -88,6 +88,7 @@ struct MSITableInfo {
     uint32 rowCount;
 };
 
+// Helper function
 static bool read_u32_le(const uint8_t* data, size_t avail, uint32_t& out)
 {
     if (avail < 4)
@@ -96,8 +97,10 @@ static bool read_u32_le(const uint8_t* data, size_t avail, uint32_t& out)
     return true;
 }
 
-// --- Main Class ---
-class MSIFile : public TypeInterface, public View::ContainerViewer::EnumerateInterface, public View::ContainerViewer::OpenItemInterface
+
+class MSIFile : public TypeInterface,
+                public View::ContainerViewer::EnumerateInterface,
+                public View::ContainerViewer::OpenItemInterface
 {
   public:
     struct Metadata {
@@ -118,7 +121,7 @@ class MSIFile : public TypeInterface, public View::ContainerViewer::EnumerateInt
         uint32_t wordCount          = 0;
         uint32_t characterCount     = 0;
         uint32_t security           = 0;
-        uint64_t totalSize          = 0;
+        uint64_t totalSize          = 0; 
     } msiMeta;
 
     uint32 sectorSize;
@@ -126,8 +129,10 @@ class MSIFile : public TypeInterface, public View::ContainerViewer::EnumerateInt
 
   private:
     OLEHeader header;
+
     std::vector<uint32> FAT;
     std::vector<uint32> miniFAT;
+
     AppCUI::Utils::Buffer miniStream;
 
     DirEntry rootDir;
@@ -146,7 +151,7 @@ class MSIFile : public TypeInterface, public View::ContainerViewer::EnumerateInt
     DirEntry* currentIterFolder = nullptr;
     size_t currentIterIndex     = 0;
 
-    // --- Internal Parsing Methods ---
+    // Parsing Methods
     bool LoadFAT();
     bool LoadMiniFAT();
     bool LoadDirectory();
@@ -154,13 +159,15 @@ class MSIFile : public TypeInterface, public View::ContainerViewer::EnumerateInt
     AppCUI::Utils::Buffer GetStream(uint32 startSector, uint64 size, bool isMini);
     void ParseSummaryInformation();
 
-    // --- Database Internal Methods ---
+    // Database Internal Methods
     static std::u16string MsiDecompressName(std::u16string_view encoded);
     static std::string ExtractLongFileName(const std::string& rawName);
     bool LoadStringPool();
     bool LoadTables();
     bool LoadDatabase();
     std::string GetString(uint32 index);
+
+    // Helpers
     std::string ParseLpstr(const uint8_t* ptr, size_t avail);
     std::string ParseLpwstr(const uint8_t* ptr, size_t avail);
 
@@ -171,7 +178,6 @@ class MSIFile : public TypeInterface, public View::ContainerViewer::EnumerateInt
     bool Update();
     void UpdateBufferViewZones(GView::View::BufferViewer::Settings& settings);
 
-    // Public Accessors
     const std::vector<MSITableInfo>& GetTableList() const
     {
         return tables;
@@ -184,12 +190,13 @@ class MSIFile : public TypeInterface, public View::ContainerViewer::EnumerateInt
     {
         return msiFiles;
     }
+
     const MsiTableDef* GetTableDefinition(const std::string& tableName) const;
     std::vector<std::vector<AppCUI::Utils::String>> ReadTableData(const std::string& tableName);
 
     static void SizeToString(uint64 value, std::string& result);
 
-    // --- GView Interfaces ---
+    // GView Related
     virtual std::string_view GetTypeName() override
     {
         return "MSI";
@@ -217,9 +224,10 @@ class MSIFile : public TypeInterface, public View::ContainerViewer::EnumerateInt
     virtual GView::Utils::JsonBuilderInterface* GetSmartAssistantContext(const std::string_view& prompt, std::string_view displayPrompt) override;
 };
 
-// --- UI Namespaces ---
+// UI Namespaces
 namespace Panels
 {
+    // Metadata
     class Information : public AppCUI::Controls::TabPage
     {
         Reference<MSIFile> msi;

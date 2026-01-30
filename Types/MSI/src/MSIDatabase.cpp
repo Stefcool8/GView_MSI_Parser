@@ -115,7 +115,7 @@ bool MSIFile::LoadDatabase()
     if (stringPool.empty())
         return false;
 
-    // 1. Detect String Index Size (2-byte vs 3-byte)
+    // Detect String Index Size (2-byte vs 3-byte)
     // Heuristic: Check if !_Columns stream size is divisible by 8 (2-byte) or 10 (3-byte)
     this->stringBytes      = 2;
     DirEntry* columnsEntry = nullptr;
@@ -136,20 +136,20 @@ bool MSIFile::LoadDatabase()
             this->stringBytes = (stringPool.size() > 65536) ? 3 : 2;
     }
 
-    // 2. Parse Schema from !_Columns
-    // Note: Parsing uses the Column-Oriented logic implemented in ReadTableData equivalent
+    // Parse Schema from !_Columns
+    // Uses the Column-Oriented logic implemented in ReadTableData equivalent
     tableDefs.clear();
     if (columnsEntry) {
         bool isMini = columnsEntry->data.streamSize < header.miniStreamCutoffSize;
         Buffer buf  = GetStream(columnsEntry->data.startingSectorLocation, columnsEntry->data.streamSize, isMini);
 
         if (buf.GetLength() > 0) {
-            // 1. Calculate Dimensions
+            // Dimensions
             uint32 colRowSize = (this->stringBytes * 2) + 4;
             uint32 numRows    = buf.GetLength() / colRowSize;
             const uint8* ptr  = buf.GetData();
 
-            // 2. Calculate Block Start Offsets (Column-Oriented)
+            // Block Start Offsets (Column-Oriented)
             // Block 1: Table Names (String Indices)
             uint32 startTable = 0;
 
@@ -162,7 +162,7 @@ bool MSIFile::LoadDatabase()
             // Block 4: Types (2-byte Integers)
             uint32 startType = startName + (numRows * stringBytes);
 
-            // 3. Iterate Rows by jumping between blocks
+            // Iterate Rows by jumping between blocks
             for (uint32 i = 0; i < numRows; i++) {
                 uint32 offset = i * colRowSize;
                 // Read Table Name (From Block 1)
@@ -177,14 +177,14 @@ bool MSIFile::LoadDatabase()
                 else
                     tableIdx = ptr[offsetTable] | (ptr[offsetTable + 1] << 8) | (ptr[offsetTable + 2] << 16);
 
-                // Read Column Number (From Block 2)
+                // Column Number (Block 2)
                 uint32 offsetNum = startNum + (i * 2);
                 uint16 colNum    = *(uint16*) (ptr + offsetNum);
                 if (colNum & 0x8000) {
                     colNum &= 0x7FFF; // Remove the high bit
                 }
 
-                // Read Column Name (From Block 3)
+                // Column Name (Block 3)
                 uint32 offsetName = startName + (i * stringBytes);
                 uint32 nameIdx    = 0;
                 if (stringBytes == 2)
@@ -192,20 +192,19 @@ bool MSIFile::LoadDatabase()
                 else
                     nameIdx = ptr[offsetName] | (ptr[offsetName + 1] << 8) | (ptr[offsetName + 2] << 16);
 
-                // Read Type (From Block 4)
+                // Type (Block 4)
                 uint32 offsetType = startType + (i * 2);
                 uint16 diskType   = *(uint16*) (ptr + offsetType);
 
-                // [FIX 1] Handle "Over 32000" Mask
                 // Strip the 0x8000 bit (Nullable/Temp flag)
                 diskType &= 0x7FFF;
 
-                // Translate Disk Type to Internal Flags
+                // Disk Type to Internal Flags
                 int finalType = 0;
                 bool isString = (diskType & 0x0800) != 0;
 
                 if (!isString) {
-                    // It is an Integer
+                    // Integer
                     finalType |= MSICOL_INTEGER;
 
                     // Determine size from the lower nibble
@@ -214,7 +213,7 @@ bool MSIFile::LoadDatabase()
                         finalType |= MSICOL_INT2;
                     }
                 }
-                // Else it remains 0 (String), which is the default.
+                // default: 0 (String).
 
                 std::string tableNameStr = GetString(tableIdx);
                 std::string colNameStr   = GetString(nameIdx);
@@ -234,14 +233,12 @@ bool MSIFile::LoadDatabase()
             }
         }
     }
-    // 4. Calculate Column Sizes & Row Width
+    // Column Sizes & Row Width
     for (auto& [name, def] : tableDefs) {
         uint32 rowWidth = 0;
         for (auto& col : def.columns) {
-            // We now TRUST the parser flags (MSICOL_INTEGER), so no heuristic fixups are needed.
-
             if (col.type & MSICOL_INTEGER) {
-                // Check our internal flag for 2-byte vs 4-byte
+                // 2-byte vs 4-byte
                 if (col.type & MSICOL_INT2) {
                     col.size = 2;
                 } else {
@@ -257,7 +254,7 @@ bool MSIFile::LoadDatabase()
         def.rowSize = rowWidth;
     }
 
-    // 5. Populate Files Panel
+    // Populate Files Panel
     if (tableDefs.find("File") != tableDefs.end()) {
         msiFiles.clear();
 
@@ -372,11 +369,11 @@ std::vector<std::vector<AppCUI::Utils::String>> MSIFile::ReadTableData(const std
     if (def.rowSize == 0)
         return results;
 
-    // --- COLUMN-ORIENTED READ LOGIC ---
+    // COLUMN-ORIENTED READ LOGIC 
     uint32 numRows   = buf.GetLength() / def.rowSize;
     const uint8* ptr = buf.GetData();
 
-    // 1. Pre-calculate Start Offsets for each Column Block
+    // Pre-calculate Start Offsets for each Column Block
     std::vector<uint32> colStartOffsets;
     uint32 currentOffset = 0;
     for (const auto& col : def.columns) {
@@ -384,7 +381,7 @@ std::vector<std::vector<AppCUI::Utils::String>> MSIFile::ReadTableData(const std
         currentOffset += (col.size * numRows);
     }
 
-    // 2. Read rows by jumping between column blocks
+    // Read rows by jumping between column blocks
     for (uint32 i = 0; i < numRows; i++) {
         std::vector<AppCUI::Utils::String> row;
 

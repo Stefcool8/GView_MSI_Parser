@@ -6,7 +6,7 @@ using namespace GView::Type::MSI::Panels;
 using namespace AppCUI::Controls;
 using namespace AppCUI::Utils;
 
-// --- Helper for Date Formatting ---
+// Helper for Date Formatting 
 static std::string TimeToString(std::time_t t)
 {
     if (t == 0)
@@ -16,9 +16,7 @@ static std::string TimeToString(std::time_t t)
     return std::string(buffer);
 }
 
-// ============================================================================
-//                               INFORMATION PANEL
-// ============================================================================
+// INFORMATION PANEL
 
 Information::Information(Reference<MSIFile> _msi) : TabPage("&Information")
 {
@@ -40,7 +38,7 @@ void Information::UpdateGeneralInformation()
             general->AddItem({ field, value });
     };
 
-    // 1. Summary Information (Metadata)
+    // Summary Information (Metadata)
     general->AddItem("Summary Information").SetType(ListViewItem::Type::Category);
     add("Title", meta.title);
     add("Subject", meta.subject);
@@ -56,14 +54,14 @@ void Information::UpdateGeneralInformation()
     if (meta.lastSaveTime != 0)
         add("Last Saved", TimeToString(meta.lastSaveTime));
 
-    // 2. Statistics
+    // Statistics
     general->AddItem("Statistics").SetType(ListViewItem::Type::Category);
     if (meta.pageCount > 0)
         add("Pages", std::to_string(meta.pageCount));
     if (meta.wordCount > 0)
         add("Words", std::to_string(meta.wordCount));
 
-    // 3. File Technical Details
+    // File Technical Details
     general->AddItem("File Details").SetType(ListViewItem::Type::Category);
 
     std::string sizeStr;
@@ -72,6 +70,8 @@ void Information::UpdateGeneralInformation()
 
     add("Sector Size", std::to_string(msi->sectorSize) + " bytes");
     add("Mini Sector Size", std::to_string(msi->miniSectorSize) + " bytes");
+
+    add("Codepage", std::to_string(meta.codepage));
 }
 
 void Information::OnAfterResize(int newWidth, int newHeight)
@@ -81,16 +81,13 @@ void Information::OnAfterResize(int newWidth, int newHeight)
     }
 }
 
-// ============================================================================
-//                               TABLES PANEL
-// ============================================================================
+// TABLES PANEL
 
 Tables::Tables(Reference<MSIFile> _msi) : TabPage("&Tables")
 {
     this->msi  = _msi;
     this->list = Factory::ListView::Create(this, "x:0,y:0,w:100%,h:100%", { "n:Name,w:30", "n:Rows,w:10,a:r" }, ListViewFlags::None);
 
-    // Set the handler to process clicks
     this->list->Handlers()->OnItemPressed = this;
 
     Update();
@@ -104,7 +101,7 @@ void Tables::Update()
     for (const auto& tbl : dbTables) {
         LocalString<32> rowStr;
         if (tbl.rowCount == 0)
-            rowStr.Set("-"); // Likely empty or pure schema
+            rowStr.Set("-"); 
         else
             rowStr.Format("%u", tbl.rowCount);
 
@@ -117,8 +114,7 @@ void Tables::OnListViewItemPressed(Reference<ListView> lv, ListViewItem item)
     // Get the table name from the first column (index 0)
     std::string tableName = (std::string) item.GetText(0);
 
-    // Create and show the TableViewer Dialog
-    // Note: TableViewer is defined in msi.hpp (Dialogs namespace) and implemented in Dialogs.cpp
+    // TableViewer Dialog
     auto viewer = new Dialogs::TableViewer(msi, tableName);
     viewer->Show();
 }
@@ -129,9 +125,7 @@ void Tables::OnAfterResize(int newWidth, int newHeight)
         list->Resize(newWidth, newHeight);
 }
 
-// ============================================================================
-//                               FILES PANEL
-// ============================================================================
+// FILES PANEL
 
 Files::Files(Reference<MSIFile> _msi) : TabPage("&Files")
 {
