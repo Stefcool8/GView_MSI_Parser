@@ -404,8 +404,7 @@ std::vector<std::vector<AppCUI::Utils::String>> MSIFile::ReadTableData(const std
                     val = *(uint16*) (ptr + valOffset);
                     // Mask high bit (MSI internal flag)
                     val &= 0x7FFF;
-                }
-                else {
+                } else {
                     val = *(uint32*) (ptr + valOffset);
                     val &= 0x7FFFFFFF;
                 }
@@ -414,7 +413,7 @@ std::vector<std::vector<AppCUI::Utils::String>> MSIFile::ReadTableData(const std
             } else {
                 uint32 strIdx = 0;
                 if (stringBytes == 2)
-                    strIdx = *(uint16*) (ptr + valOffset); 
+                    strIdx = *(uint16*) (ptr + valOffset);
                 else
                     strIdx = ptr[valOffset] | (ptr[valOffset + 1] << 8) | (ptr[valOffset + 2] << 16);
                 row.emplace_back(GetString(strIdx).c_str());
