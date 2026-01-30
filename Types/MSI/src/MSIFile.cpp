@@ -566,57 +566,137 @@ void MSIFile::UpdateBufferViewZones(GView::View::BufferViewer::Settings& setting
         SectorTranslator(uint32 size) : sSize(size)
         {
         }
-        uint64_t TranslateToFileOffset(uint64 value, uint32) override
+
+        uint64_t TranslateToFileOffset(uint64 value, uint32 fromTranslationIndex) override
         {
             return (uint64_t) (value + 1) * sSize;
         }
-        uint64_t TranslateFromFileOffset(uint64 value, uint32) override
+
+        uint64_t TranslateFromFileOffset(uint64 value, uint32 toTranslationIndex) override
         {
-            return (value < 512) ? 0 : (value / sSize) - 1;
+            if (value < 512)
+                return 0;
+            return (value / sSize) - 1;
         }
     };
 
     settings.SetName("MSI Structure");
     settings.SetEndianess(GView::Dissasembly::Endianess::Little);
+
+    // SECTOR OFFSET TRANSLATOR
+
     settings.SetOffsetTranslationList({ "Sector" }, new SectorTranslator(this->sectorSize));
 
-    settings.AddBookmark(0, 0); // Header
+    // BOOKMARKS 
+    
+    // ID 0: Header
+    settings.AddBookmark(0, 0);
+
+    // ID 1: Directory
     if (header.firstDirSector != ENDOFCHAIN)
         settings.AddBookmark(1, (uint64) (header.firstDirSector + 1) * sectorSize);
 
-    auto addMergedZones = [&](std::vector<uint32>& sectors, ColorPair col, std::string_view baseName) {
-        if (sectors.empty())
-            return;
-        std::sort(sectors.begin(), sectors.end());
+    // ID 2: FAT
+    if (header.difat[0] != ENDOFCHAIN && header.difat[0] != NOSTREAM) {
+        settings.AddBookmark(2, (uint64) (header.difat[0] + 1) * sectorSize);
+    } else if (header.firstDifatSector != ENDOFCHAIN) {
+        settings.AddBookmark(2, (uint64) (header.firstDifatSector + 1) * sectorSize);
+    }
 
-        uint64 start = sectors[0], count = 1;
-        for (size_t i = 1; i < sectors.size(); i++) {
-            if (sectors[i] == start + count) {
-                count++;
-            } else {
-                settings.AddZone((start + 1) * sectorSize, count * sectorSize, col, baseName);
-                start = sectors[i];
-                count = 1;
-            }
+    // ID 3: MiniFAT
+    if (header.firstMiniFatSector != ENDOFCHAIN)
+        settings.AddBookmark(3, (uint64) (header.firstMiniFatSector + 1) * sectorSize);
+
+    // ID 4: Root Entry Data 
+    if (!linearDirList.empty() && linearDirList[0]->data.startingSectorLocation != ENDOFCHAIN) {
+        uint32 rootSect = linearDirList[0]->data.startingSectorLocation;
+        if (rootSect < 0xFFFFFFFA) {
+            settings.AddBookmark(4, (uint64) (rootSect + 1) * sectorSize);
         }
-        settings.AddZone((start + 1) * sectorSize, count * sectorSize, col, baseName);
+    }
+
+    // ID 5+: Only Big Streams
+    for (auto* entry : linearDirList) {
+        if (entry->data.streamSize < header.miniStreamCutoffSize || entry->data.streamSize == 0)
+            continue;
+
+        std::u16string dName = MsiDecompressName(entry->name);
+
+        if (dName.find(u"DigitalSignature") != std::u16string::npos) {
+            settings.AddBookmark(5, (uint64) (entry->data.startingSectorLocation + 1) * sectorSize);
+        }
+    }
+
+    // ZONES
+
+    auto addSectorZone = [&](uint32 sect, ColorPair col, std::string_view name) {
+        if (sect >= 0xFFFFFFFA)
+            return;
+        settings.AddZone((uint64) (sect + 1) * sectorSize, sectorSize, col, name);
     };
 
-    // FAT Sectors
+    settings.AddZone(0, 512, ColorPair{ Color::White, Color::Magenta }, "Header");
+    
+    // DIFAT & FAT
     std::vector<uint32> fatSectors;
     for (int i = 0; i < 109; i++)
         if (header.difat[i] < 0xFFFFFFFA)
             fatSectors.push_back(header.difat[i]);
-    addMergedZones(fatSectors, { Color::Green, Color::Black }, "FAT Sector");
 
-    // Directory
-    std::vector<uint32> dirSectors;
-    uint32 s = header.firstDirSector;
-    while (s < FAT.size()) {
-        dirSectors.push_back(s);
-        s = FAT[s];
+    uint32 currDifat = header.firstDifatSector;
+    uint32 safety    = 0;
+    while (currDifat < 0xFFFFFFFA && safety++ < 1000) {
+        addSectorZone(currDifat, ColorPair{ Color::Red, Color::Transparent }, "DIFAT Sector");
+        auto view = this->obj->GetData().Get((uint64) (currDifat + 1) * sectorSize, sectorSize, true);
+        if (!view.IsValid())
+            break;
+        const uint32* ptr = reinterpret_cast<const uint32*>(view.GetData());
+        for (uint32 k = 0; k < (sectorSize / 4) - 1; k++)
+            if (ptr[k] < 0xFFFFFFFA)
+                fatSectors.push_back(ptr[k]);
+        currDifat = ptr[(sectorSize / 4) - 1];
     }
-    addMergedZones(dirSectors, { Color::Olive, Color::Black }, "Directory Sector");
 
-    settings.AddZone(0, 512, { Color::White, Color::Magenta }, "Header");
+    for (auto sect : fatSectors)
+        addSectorZone(sect, ColorPair{ Color::Green, Color::Transparent }, "FAT Sector");
+
+    // Directory & MiniFAT
+    uint32 ds = header.firstDirSector;
+    safety    = 0;
+    while (ds < FAT.size() && safety++ < 5000) {
+        addSectorZone(ds, ColorPair{ Color::Red, Color::Transparent }, "Directory Sector");
+        ds = FAT[ds];
+    }
+
+    uint32 mfs = header.firstMiniFatSector;
+    safety     = 0;
+    while (mfs < FAT.size() && safety++ < 5000) {
+        addSectorZone(mfs, ColorPair{ Color::Teal, Color::Transparent }, "MiniFAT Sector");
+        mfs = FAT[mfs];
+    }
+
+    // Streams
+    for (auto* entry : linearDirList) {
+        if (entry->data.streamSize < header.miniStreamCutoffSize)
+            continue;
+
+        std::u16string dName = MsiDecompressName(entry->name);
+        AppCUI::Utils::String temp;
+        temp.Set(dName);
+
+        ColorPair cp = { Color::Silver, Color::Transparent };
+        if (dName.find(u"SummaryInformation") != std::u16string::npos)
+            cp = { Color::Yellow, Color::Transparent };
+        else if (!dName.empty() && dName[0] == u'!')
+            cp = { Color::Aqua, Color::Transparent };
+        else if (dName == u"Root Entry")
+            cp = { Color::Gray, Color::Transparent };
+
+        uint32 s     = entry->data.startingSectorLocation;
+        uint32 limit = 0;
+        while (s < FAT.size() && limit++ < 10000) {
+            addSectorZone(s, cp, temp.GetText());
+            s = FAT[s];
+        }
+    }
 }
