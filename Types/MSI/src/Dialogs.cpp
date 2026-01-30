@@ -5,14 +5,19 @@ using namespace GView::Type::MSI::Dialogs;
 using namespace AppCUI::Controls;
 using namespace AppCUI::Input;
 
-TableViewer::TableViewer(Reference<MSIFile> _msi, const std::string& tableName) : Window(tableName, "d:c,w:90%,h:80%", WindowFlags::Sizeable)
+TableViewer::TableViewer(Reference<MSIFile> _msi, const std::string& tableName) : Window(tableName, "d:c,w:95%,h:80%", WindowFlags::Sizeable)
 {
     // List View
     this->list = Factory::ListView::Create(this, "x:0,y:0,w:100%,h:100%", {}, ListViewFlags::AllowMultipleItemsSelection);
 
+    // Beyond the maxColumns count, the columns will not be displayed (gui limitation)
+    int colCount = 0, maxColumns = 8;
+
     auto def = _msi->GetTableDefinition(tableName);
     if (def) {
         for (const auto& col : def->columns) {
+            if (++colCount > maxColumns)
+                break;
             // Format string: "n:ColName,a:l,w:20"
             // n = name, a = align (left), w = width
             AppCUI::Utils::LocalString<128> colFormat;
@@ -37,6 +42,8 @@ TableViewer::TableViewer(Reference<MSIFile> _msi, const std::string& tableName) 
 
         // Set texts for subsequent columns
         for (size_t i = 1; i < row.size(); i++) {
+            if (i > maxColumns - 1)
+                break;
             item.SetText((uint32) i, row[i]);
         }
     }
