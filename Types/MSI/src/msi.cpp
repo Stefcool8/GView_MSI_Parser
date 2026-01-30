@@ -91,7 +91,7 @@ PLUGIN_EXPORT bool PopulateWindow(Reference<WindowInterface> win)
 
     settings.AddProperty("Size", sizeAsString);
 
-    // Updated Columns for MSI Files
+    // Columns for MSI Files
     settings.SetColumns({ "n:&Name,a:l,w:40", "n:&Directory,a:l,w:20", "n:&Component,a:l,w:20", "n:&Size,a:r,w:10", "n:&Version,a:l,w:15" });
 
     settings.SetEnumerateCallback(msi.ToObjectRef<ContainerViewer::EnumerateInterface>());

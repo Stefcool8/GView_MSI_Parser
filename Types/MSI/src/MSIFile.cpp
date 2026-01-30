@@ -4,7 +4,7 @@
 using namespace GView::Type::MSI;
 using namespace AppCUI::Utils;
 
-// --- Static Helper Functions for Binary Parsing ---
+// Static Helper Functions for Binary Parsing
 
 static bool read_u64_le(const uint8_t* data, size_t avail, uint64_t& out)
 {
@@ -30,7 +30,7 @@ static void filetime_to_time_t(uint64_t ft, std::time_t& t)
         t = 0;
 }
 
-// --- MSIFile Implementation ---
+// MSIFile Implementation
 
 MSIFile::MSIFile() : header{}, sectorSize{ 0 }, miniSectorSize{ 0 }
 {
@@ -61,7 +61,7 @@ bool MSIFile::Update()
     BuildTree(this->rootDir);
     ParseSummaryInformation();
 
-    // Database Loading (Implementation in MSIDatabase.cpp)
+    // Database Loading 
     if (LoadStringPool()) {
         LoadDatabase();
         LoadTables();
@@ -70,7 +70,7 @@ bool MSIFile::Update()
     return true;
 }
 
-// --- OLE Core Parsing ---
+// OLE Core Parsing
 
 bool MSIFile::LoadFAT()
 {
@@ -82,14 +82,14 @@ bool MSIFile::LoadFAT()
     std::vector<uint32> difatList;
     difatList.reserve(numSectors);
 
-    // 1. Header DIFAT
+    // Header DIFAT
     for (int i = 0; i < 109; i++) {
         if (header.difat[i] == ENDOFCHAIN || header.difat[i] == NOSTREAM)
             break;
         difatList.push_back(header.difat[i]);
     }
 
-    // 2. External DIFAT
+    // External DIFAT
     uint32 currentDifatSector = header.firstDifatSector;
     uint32 entriesPerDifat    = (sectorSize / 4) - 1;
     uint32 safetyLimit        = 0;
@@ -108,7 +108,7 @@ bool MSIFile::LoadFAT()
         currentDifatSector = data[entriesPerDifat];
     }
 
-    // 3. Load FAT Sectors
+    // Load FAT Sectors
     for (uint32 sect : difatList) {
         uint64 offset = (uint64) (sect + 1) * sectorSize;
         auto view     = this->obj->GetData().Get(offset, sectorSize, true);
@@ -150,6 +150,7 @@ bool MSIFile::LoadDirectory()
                 e->name.assign(d[i].name, charCount);
                 e->decodedName = MsiDecompressName(e->name);
             }
+
             linearDirList.push_back(e);
         }
 
@@ -176,7 +177,7 @@ bool MSIFile::LoadMiniFAT()
     return true;
 }
 
-AppCUI::Utils::Buffer MSIFile::GetStream(uint32 startSector, uint64 size, bool isMini)
+Buffer MSIFile::GetStream(uint32 startSector, uint64 size, bool isMini)
 {
     std::vector<uint32>& table = isMini ? miniFAT : FAT;
     uint32 sSize               = isMini ? miniSectorSize : sectorSize;
@@ -206,7 +207,7 @@ AppCUI::Utils::Buffer MSIFile::GetStream(uint32 startSector, uint64 size, bool i
 
         sect = table[sect];
 
-        // Optimization: Stop if we gathered enough data
+        // Stop if we gathered enough data
         if (size > 0 && result.GetLength() >= size) {
             result.Resize(size);
             break;
@@ -245,7 +246,7 @@ void MSIFile::BuildTree(DirEntry& parent)
     }
 }
 
-// --- Metadata & Utils ---
+// Metadata & Utils
 
 void MSIFile::ParseSummaryInformation()
 {
@@ -259,7 +260,6 @@ void MSIFile::ParseSummaryInformation()
         if (buf.GetLength() < 48)
             return;
 
-        msiMeta.totalSize   = static_cast<uint64_t>(buf.GetLength());
         const uint8_t* data = buf.GetData();
         size_t bufLen       = buf.GetLength();
 
@@ -331,10 +331,16 @@ void MSIFile::ParseSummaryInformation()
                 }
                 break;
             }
-            case 2:                // VT_I2
-                if (propID == 1) { /* Codepage logic if needed */
+            case 2: // VT_I2
+            {
+                int16_t codepage = 0;
+                if (propID == 1 && valueAvail >= 6) { 
+                    const uint8_t* cp_ptr = valuePtr + 4;
+                    codepage = (int16_t)((uint16_t)cp_ptr[0] | ((uint16_t)cp_ptr[1] << 8));
+                    msiMeta.codepage = codepage;
                 }
                 break;
+            }
             case 3: // VT_I4
             {
                 uint32_t v = 0;
@@ -348,7 +354,7 @@ void MSIFile::ParseSummaryInformation()
             } break;
             }
         }
-        break; // Only parse the first section
+        break;
     }
 }
 
@@ -377,6 +383,8 @@ std::u16string MSIFile::MsiDecompressName(std::u16string_view encoded)
 
 void MSIFile::SizeToString(uint64 value, std::string& result)
 {
+    // Convert size in bytes to UI friendly string
+
     const char* units[] = { "Bytes", "KB", "MB", "GB", "TB" };
     int unitIndex       = 0;
     double doubleValue  = static_cast<double>(value);
@@ -395,7 +403,7 @@ void MSIFile::SizeToString(uint64 value, std::string& result)
     result = buffer;
 }
 
-// --- Viewer & GView Interface ---
+// Viewer & GView Interface
 
 bool MSIFile::BeginIteration(std::u16string_view path, AppCUI::Controls::TreeViewItem parent)
 {
