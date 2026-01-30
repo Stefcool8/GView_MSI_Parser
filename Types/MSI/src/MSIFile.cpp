@@ -517,6 +517,7 @@ bool MSIFile::PopulateItem(AppCUI::Controls::TreeViewItem item)
 
             if (child->data.objectType == 1 || child->data.objectType == 5) { // Storage/Root
                 item.SetText(1, "Folder");
+                item.SetData<DirEntry>(child);
                 item.SetExpandable(true);
             } else {
                 item.SetText(1, "Stream");
